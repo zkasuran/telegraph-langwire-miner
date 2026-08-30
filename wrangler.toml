@@ -1,0 +1,6 @@
+name = "telegraph-lang"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+
+# LangWire translation miner for Telegraph. Serves LANGUAGE_TRANSLATION (/translate) from the
+# public MyMemory API, keyless. No secrets, no bindings: deploy is just `wrangler deploy`.

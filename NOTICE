@@ -1,0 +1,16 @@
+This miner serves data from third parties. Their terms travel with it.
+
+Each block below names one upstream, what it provides, the licence it publishes under, and the
+exact credit line that licence requires. Every credit line marked required also travels in the
+`attribution` field of every answer this miner returns, not only in this file.
+
+## apertium.org
+
+Machine translation.
+
+Licence: Free and open-source (GPL for the engine and the language data).
+
+Required credit line:
+
+    Translation by Apertium (https://www.apertium.org/), free and open-source machine translation.
+
