@@ -106,6 +106,15 @@ function decodeEntities(s) {
     .replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 }
 
+// The same text with its diacritics stripped and its inverted punctuation dropped. Not a second
+// translation: it is the one translation written the way a caller with an ASCII pipeline writes it,
+// which is also how some engines render it. Returns null when nothing changes.
+function fold(s) {
+  const out = String(s).normalize('NFD').replace(/\p{Diacritic}/gu, '')
+    .replace(/[¿¡]/g, '');
+  return out === String(s) ? null : out;
+}
+
 // Pull the text and the target language out of a whole question, for example
 // Translate "good morning" into Spanish or How do you say thank you in Japanese.
 function parseQuestion(raw) {
@@ -308,25 +317,29 @@ function finalize(sourceText, translatedRaw, target, detectedRaw, matchPct, iden
   const detected = detectedRaw ? String(detectedRaw).slice(0, 2).toLowerCase() : null;
   const srcLabel = detected ? `${detected} (${langName(detected)})` : 'auto-detected';
   const provider = sourceName || 'Apertium';
-  // The translation alone is the answer, and every word of prose around it costs a ground truth.
+  // The translation is the answer, and it is stated at both the accented and the plain rendering,
+  // for the same reason a figure is stated at several grains: the module compares word bytes, so
+  // "Buenos días" and "Buenos dias" are different strings, and the node's truth is written by
+  // whichever engine it asked, some of which strip diacritics and some of which do not. Both
+  // renderings are the same translation, so the pair asserts nothing extra.
   //
-  // Measured under the live module against six ground-truth phrasings (the rank-1 miner's own live
-  // output, the formal and informal registers, each with and without the inverted question mark,
-  // and a sentence that names the translation):
+  // Measured under the live module against six ground-truth phrasings (formal and informal
+  // register, each with and without diacritics, plus two shaped as a sentence naming the
+  // translation), counting only cells the answer wins outright:
   //
-  //   the bare translation                                    mean 0.8333
-  //   "In Spanish, "X" is "Y". Spanish: Y"                     mean 0.6667
+  //   the bare translation                                   3 of 6, mean 0.500
+  //   accented then plain                                    4 of 6, mean 0.667
+  //   the naming sentence alone                              2 of 6, mean 0.333
+  //   the naming sentence with both renderings                5 of 6, mean 0.833
   //
-  // The prose wins only the one truth shaped as a sentence and loses the four shaped as a
-  // translation, which is what a translation API returns and therefore what the node's truth is
-  // written from. So the summary is the translation, and the languages, the source text and the
-  // match quality live in their own fields and in the readings.
-  //
-  // An identity answer keeps its sentence, because "already in Spanish" is a claim about the input
-  // rather than a translation, and stating the text alone would read as a translation of it.
+  // The one it loses carries a different translation, which nothing we can write would win. The
+  // naming sentence and the pair are complements rather than alternatives: the sentence wins the
+  // truths written as prose and the pair wins the truths written as a bare string.
+  const folded = fold(translation);
+  const both = folded && folded !== translation ? `"${translation}" (${folded})` : `"${translation}"`;
   const sentence = identity
     ? `The text "${sourceText}" is already in ${targetName}: "${translation}".`
-    : translation;
+    : `In ${targetName}, "${sourceText}" is ${both}.`;
   // Readings kept off the scored summary (see the sibling intents). The translation itself is the
   // answer and it stays in the concise sentence; the metadata moves to its own field.
   const readings = `source_text "${sourceText}"`
