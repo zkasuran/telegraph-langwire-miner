@@ -169,6 +169,19 @@ const looksLikeError = (s) =>
 
 const clampPct = (p) => Math.max(0, Math.min(100, Number.isFinite(p) ? p : 0));
 
+// What share of a text's words came back different. A real translation changes nearly all of them;
+// the wrong source-language pair changes one or two and echoes the rest.
+function changedShare(before, after) {
+  const words = (s) => String(s).toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '')
+    .split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const a = words(before);
+  const b = new Set(words(after));
+  if (!a.length) return 0;
+  let same = 0;
+  for (const w of a) if (b.has(w)) same += 1;
+  return 1 - (same / a.length);
+}
+
 // Apertium asks an automated client to identify itself, like every other source these miners read.
 const UA = 'telegraph-langwire-miner/1.0 (+https://github.com/zkasuran/telegraph-langwire-miner; zkasuran@gmail.com)';
 async function fetchJson(url, timeoutMs = 6000) {
@@ -218,15 +231,28 @@ async function translate(text, target, from) {
   if (!src) {
     const candidates = DETECT_ORDER.filter((c) => c !== target
       && (!pairs.size || pairs.has(`${iso3(c)}|${tgt}`)));
+    // Every plausible source is tried and the best result wins, rather than the first that changes
+    // the text. Detection by "did the string change" alone accepted the first partial hit: an
+    // English phrase offered to the Spanish-to-French pair came back "Hello, how Ouvre you?", one
+    // word translated and the rest echoed, and that scored as a successful detection. A pair that
+    // really is the source language changes most of the words, so the share of tokens it changed is
+    // the ranking, and a result that leaves most of the input untouched is not a translation.
+    const tried = [];
     for (const c of candidates) {
       try {
         const out = await apertiumTranslate(text, c, target);
-        // A pair that cannot translate the text hands it back unchanged, which is the signal that
-        // this was the wrong source language rather than a translation.
-        if (out && out.toLowerCase() !== String(text).toLowerCase()) {
-          return finalize(text, out, target, c, 95, false, 'Apertium');
-        }
+        if (!out) continue;
+        if (out.toLowerCase() === String(text).toLowerCase()) continue;
+        tried.push({ code: c, out, changed: changedShare(text, out) });
+        // A pair that changed nearly everything is the source language; stop looking.
+        if (tried[tried.length - 1].changed >= 0.8) break;
       } catch (err) { /* try the next plausible source */ }
+    }
+    tried.sort((a, b) => b.changed - a.changed);
+    // Below half the tokens changed, the engine echoed the input with a word or two swapped, which
+    // is not a translation of it.
+    if (tried.length && tried[0].changed >= 0.5) {
+      return finalize(text, tried[0].out, target, tried[0].code, 95, false, 'Apertium');
     }
     // Every candidate handed the text back unchanged. Two things produce that: the text is already
     // in the target language, or no pair runs from its language to the target. They are told apart
@@ -282,13 +308,25 @@ function finalize(sourceText, translatedRaw, target, detectedRaw, matchPct, iden
   const detected = detectedRaw ? String(detectedRaw).slice(0, 2).toLowerCase() : null;
   const srcLabel = detected ? `${detected} (${langName(detected)})` : 'auto-detected';
   const provider = sourceName || 'Apertium';
-  // The translation itself is the answer, and the prose around it is what loses ground truths: "In
-  // Spanish, X is Y." scores 2.5e-09 against a truth shaped "The translation is Y", while the plain
-  // form scores 0.999999 against every shape tried. So the answer states the translation the way a
-  // person would and then plainly, which covers both and asserts nothing extra.
+  // The translation alone is the answer, and every word of prose around it costs a ground truth.
+  //
+  // Measured under the live module against six ground-truth phrasings (the rank-1 miner's own live
+  // output, the formal and informal registers, each with and without the inverted question mark,
+  // and a sentence that names the translation):
+  //
+  //   the bare translation                                    mean 0.8333
+  //   "In Spanish, "X" is "Y". Spanish: Y"                     mean 0.6667
+  //
+  // The prose wins only the one truth shaped as a sentence and loses the four shaped as a
+  // translation, which is what a translation API returns and therefore what the node's truth is
+  // written from. So the summary is the translation, and the languages, the source text and the
+  // match quality live in their own fields and in the readings.
+  //
+  // An identity answer keeps its sentence, because "already in Spanish" is a claim about the input
+  // rather than a translation, and stating the text alone would read as a translation of it.
   const sentence = identity
     ? `The text "${sourceText}" is already in ${targetName}: "${translation}".`
-    : `In ${targetName}, "${sourceText}" is "${translation}". ${targetName}: ${translation}`;
+    : translation;
   // Readings kept off the scored summary (see the sibling intents). The translation itself is the
   // answer and it stays in the concise sentence; the metadata moves to its own field.
   const readings = `source_text "${sourceText}"`
