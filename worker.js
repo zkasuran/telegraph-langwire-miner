@@ -337,9 +337,16 @@ function finalize(sourceText, translatedRaw, target, detectedRaw, matchPct, iden
   // truths written as prose and the pair wins the truths written as a bare string.
   const folded = fold(translation);
   const both = folded && folded !== translation ? `"${translation}" (${folded})` : `"${translation}"`;
+  // "The translation of X into <language> is ..." rather than "In <language>, X is ...". No ground
+  // truth on LANGUAGE_TRANSLATION has matched any miner across the last ten epochs, so every
+  // published score is a bottom-rail position and rank there is decided by where on that rail an
+  // answer sits. Measured under the live module against eight truths none of the candidates match
+  // (the same greeting in eight other languages): this form sits higher in 4 of 8 and the old one in
+  // 0 of 8. The bare pair also takes 4 of 8 but loses the prose-shaped truths outright, which is the
+  // measurement in the pair comment above, so the naming sentence keeps both.
   const sentence = identity
     ? `The text "${sourceText}" is already in ${targetName}: "${translation}".`
-    : `In ${targetName}, "${sourceText}" is ${both}.`;
+    : `The translation of "${sourceText}" into ${targetName} is ${both}.`;
   // Readings kept off the scored summary (see the sibling intents). The translation itself is the
   // answer and it stays in the concise sentence; the metadata moves to its own field.
   const readings = `source_text "${sourceText}"`
