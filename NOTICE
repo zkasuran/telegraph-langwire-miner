@@ -1,16 +1,30 @@
-This miner serves data from third parties. Their terms travel with it.
+NOTICE
 
-Each block below names one upstream, what it provides, the licence it publishes under, and the
-exact credit line that licence requires. Every credit line marked required also travels in the
-`attribution` field of every answer this miner returns, not only in this file.
+The langwire miner's own code is source-available no-derivatives licensed (SAND 1.0),
+Copyright (c) 2026 zkasuran, see LICENSE. This file records the third-party terms that
+travel with it.
 
-## apertium.org
+--------------------------------------------------------------------------------
+api.minimax.io (MiniMax API, Open Platform)
 
-Machine translation.
-
-Licence: Free and open-source (GPL for the engine and the language data).
-
-Required credit line:
-
-    Translation by Apertium (https://www.apertium.org/), free and open-source machine translation.
-
+  Provides       The language-model answer for every intent this miner serves.
+                 SENTIMENT_ANALYSIS, TEXT_CLASSIFICATION, LANGUAGE_GENERATION and
+                 LANGUAGE_TRANSLATION are each answered by one call to MiniMax-M3 at
+                 request time.
+  Plan           A paid commercial MiniMax plan held by the operator. The API key is
+                 a Cloudflare secret set with `wrangler secret put MINIMAX_API_KEY`
+                 and read as env.MINIMAX_API_KEY. It is never in the code or the repo.
+  Output rights  MiniMax's consumer App and Web Terms of Service state "We do not
+                 claim ownership of User Contributions or User Generated Content" but
+                 limit that consumer surface to "personal, non-commercial use only".
+                 Those consumer terms do not govern the paid API Open Platform this
+                 miner calls. The exact Open Platform clause on output ownership and
+                 commercial use could not be read, because the platform terms page is
+                 client-rendered and returned no text to a server fetch (404 to a
+                 server fetch on 2026-10-01), so it is recorded as unverified and
+                 carried as an open item in DATA-SOURCES.md.
+  Credit         Published in every answer, in the attribution field: "Answer produced
+                 with MiniMax (MiniMax-M3) under a commercial MiniMax plan held by
+                 zkasuran."
+  Terms          https://platform.minimax.io/protocol/en-US/user-agreement (unverified,
+                 client-rendered)

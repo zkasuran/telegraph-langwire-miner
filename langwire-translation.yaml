@@ -5,11 +5,12 @@ slug: langwire-translation
 protocol: generic
 name: LangWire Translation
 description: >
-  Translate a phrase or a sentence into a target language, read live at request time from the
-  public keyless MyMemory API. Answers the LANGUAGE_TRANSLATION intent for the common world
-  languages by name or by ISO code. The source language is auto-detected when it is not given.
-  The translated text is the answer, stated verbatim in the sentence and repeated in the
-  readings with the languages and the match quality. No API key.
+  Translate a phrase or a sentence into a target language, answered by a language model at
+  request time. Send the text with the target language or send the whole question. The miner
+  returns the idiomatic translation stated in one plain sentence. The source language is
+  inferred from the text. The answer is produced with MiniMax (MiniMax-M3) under a commercial
+  plan held by the operator, so this miner is not keyless. Serves the LANGUAGE_TRANSLATION
+  intent.
 base_url: https://telegraph-lang.margyn.workers.dev
 
 docs:
@@ -17,10 +18,10 @@ docs:
 
 limitations:
   - code: MAX_PARAM_VALUE
-    message: text is the phrase or sentence to translate. target is a language name (Spanish) or an ISO code (es). A whole question such as Translate "good morning" into Spanish is accepted too.
+    message: text is the phrase or sentence to translate. to is a language name (Spanish) or an ISO code (es). A whole question such as Translate "good morning" into Spanish is accepted too.
     param: text
     property: length
-    value_num: 500
+    value_num: 2000
     operator: lte
 
 rate_limit_per_sec: 2
@@ -35,17 +36,14 @@ input_schema:
       type: string
       description: >
         The full natural-language question, verbatim, for example Translate "good morning"
-        into Spanish. The miner parses the text and the target language out of it, so passing
-        the whole question works as well as the structured fields.
+        into Spanish. The miner reads the text and the target language from it, so passing the
+        whole question works as well as the structured fields.
     text:
       type: string
       description: The phrase or sentence to translate.
     to:
       type: string
       description: Target language, a name such as Spanish or an ISO code such as es.
-    from:
-      type: string
-      description: Optional source language, a name or an ISO code. Auto-detected when omitted.
 
 output_schema:
   type: object
@@ -53,33 +51,21 @@ output_schema:
     source_text:
       type: string
       description: The text that was translated.
-    source_lang:
-      type: string
-      description: Source language ISO code, detected or given.
-    target_lang:
-      type: string
-      description: Target language ISO code.
     target_language:
       type: string
-      description: Target language name.
+      description: Target language as given in the request.
     translation:
       type: string
-      description: The translated text, verbatim from MyMemory.
-    match_percent:
-      type: integer
-      description: MyMemory match quality for the translation, 0 to 100.
-    confidence:
-      type: number
-      description: 0.95 to 0.97 for a direct translation.
+      description: The translated text, read from the stated answer.
     summary:
       type: string
-      description: One sentence stating the translation verbatim, then a Readings block.
-    source:
-      type: string
-      description: The public source that produced the translation.
+      description: One sentence stating the translation idiomatically.
+    confidence:
+      type: number
+      description: 0.96 for a direct translation, lower when the answer is degraded.
     as_of:
       type: string
-      description: ISO 8601 timestamp of the read.
+      description: ISO 8601 timestamp the answer was produced.
 
 endpoints:
   - path: /translate
@@ -107,23 +93,19 @@ on_chain:
         description: The text that was translated.
         source_path: source_text
       - index: 1
-        name: target_lang
-        description: Target language ISO code.
-        source_path: target_lang
-      - index: 2
         name: translation
-        description: The translated text, verbatim from MyMemory.
+        description: The translated text, read from the stated answer.
         source_path: translation
-      - index: 3
+      - index: 2
         name: summary
-        description: One sentence stating the translation verbatim, then a Readings block.
+        description: One sentence stating the translation idiomatically.
         source_path: summary
     integers:
       - index: 0
-        name: match_percent
-        description: MyMemory match quality for the translation, 0 to 100.
-        source_path: match_percent
-        multiplier: 1
+        name: confidence_x100
+        description: Confidence in the answer, scaled by one hundred to keep two digits as an integer.
+        source_path: confidence
+        multiplier: 100
   request:
     - endpoint: translate
       method: GET

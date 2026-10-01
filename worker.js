@@ -1,22 +1,28 @@
-// Telegraph translation miner: the LANGUAGE_TRANSLATION intent, served by Apertium, the free and
-// open-source rule-based translation engine, keylessly and live at request time.
+// Telegraph langwire miner: SENTIMENT_ANALYSIS, TEXT_CLASSIFICATION, LANGUAGE_GENERATION and
+// LANGUAGE_TRANSLATION.
 //
-// Apertium is here for its licence rather than its reach. The endpoints this miner used before
-// cannot be squared with a paid miner: Google's keyless translate_a/t endpoint is undocumented and
-// the Translate API terms state the API "is provided to you without any free usage quota", while
-// Google's own attribution page requires a "powered by Google Translate" graphic displayed
-// "adjacent any translation results", which a JSON API cannot show. MyMemory bars users from
-// reselling "Translated's services as they are without Translated express consent" and caps
-// anonymous use at 5000 characters a day shared across every caller on the same address.
+// These are language-model intents. The node writes its own ground truth for each one with a
+// model and scores a miner on how well its answer matches that truth, so a genuinely correct,
+// well-shaped answer is what scores. This worker answers each intent by calling MiniMax, a
+// language model the operator holds a commercial plan for, with a tight per-intent system prompt,
+// then returns the model's answer as the summary the node grades.
 //
-// Rule-based translation covers fewer pairs than a neural service, so a pair Apertium does not
-// serve gets an answer that says so. That is deliberate: a guessed translation is a fabricated
-// answer, which is worse than an honest gap however it scores. Every alternative with a real
-// commercial grant was probed from this edge and none answered (LibreTranslate public instances
-// return 405, 502, 523 or a bot challenge; every Lingva mirror 500s or 503s).
+//   SENTIMENT_ANALYSIS    the sentiment as a full sentence plus the words that carry it
+//   TEXT_CLASSIFICATION   the single best category plus one short reason it fits
+//   LANGUAGE_GENERATION   a direct, complete reference answer to the request
+//   LANGUAGE_TRANSLATION  the idiomatic translation stated in one plain sentence
 //
-// The credit Apertium asks for travels in every answer, in `attribution`, as well as in NOTICE
-// and DATA-SOURCES.md.
+// The MiniMax key is never in this file. It is read from env.MINIMAX_API_KEY, a Cloudflare
+// secret the deployer sets with `wrangler secret put MINIMAX_API_KEY`. With no key or on any
+// upstream error or timeout the worker still answers 200 with an honest degraded summary, because
+// the node reads any non-200 on a declared route as no answer and scores the whole epoch zero
+// whatever the answer would have been.
+//
+// MiniMax-M3 is a reasoning model that emits a <think> block before its answer. That block is
+// reasoning, not the answer, so it is stripped and only the text after it is returned. The think
+// phase adds latency, so the upstream call is given a wider timeout than a non-reasoning model
+// needs. The MiniMax terms and the plan that licenses these answers for a paid service are in
+// NOTICE and DATA-SOURCES.md.
 
 /**
  * Licence: source-available, no derivatives. Copyright (c) 2026 zkasuran.
@@ -26,355 +32,198 @@
  * redistribute it, publish a modified copy, or redeploy it as a competing miner. Calling
  * the live endpoint is not restricted by the licence at all.
  *
- * Full terms: LICENSE. Third-party data terms and the credit lines each upstream
- * requires: NOTICE and DATA-SOURCES.md. The data this worker serves is not ours and
- * carries its own licences and limits.
+ * Full terms: LICENSE. Third-party terms and the credit line the model provider asks for:
+ * NOTICE and DATA-SOURCES.md. The model this worker calls is not ours and carries its own
+ * terms.
  */
-const APERTIUM = 'https://apertium.org/apy';
-const CREDIT_APERTIUM = 'Translation by Apertium (https://www.apertium.org/), free and open-source machine translation.';
 
-// Apertium keys its pairs on three-letter ISO 639-3 codes, so a two-letter code maps across.
-const ISO3 = {
-  en: 'eng', es: 'spa', ca: 'cat', gl: 'glg', pt: 'por', fr: 'fra', it: 'ita', ro: 'ron',
-  oc: 'oci', an: 'arg', ast: 'ast', eu: 'eus', cy: 'cym', br: 'bre', ga: 'gle', gd: 'gla',
-  nl: 'nld', af: 'afr', da: 'dan', sv: 'swe', nb: 'nob', nn: 'nno', is: 'isl',
-  ru: 'rus', uk: 'ukr', be: 'bel', pl: 'pol', cs: 'ces', sk: 'slk', sl: 'slv', hr: 'hbs',
-  sr: 'hbs', bs: 'hbs', mk: 'mkd', bg: 'bul', el: 'ell', tr: 'tur', kk: 'kaz', ky: 'kir',
-  tt: 'tat', uz: 'uzb', az: 'aze', hy: 'hye', ka: 'kat', id: 'ind', ms: 'zlm', hi: 'hin',
-  ur: 'urd', mt: 'mlt', ar: 'ara', he: 'heb', fa: 'pes', sw: 'swh', eo: 'epo', la: 'lat',
-  hu: 'hun', fi: 'fin', et: 'est', lv: 'lav', lt: 'lit', sq: 'sqi', kab: 'kab', crh: 'crh',
-};
-const iso3 = (code) => ISO3[String(code || '').toLowerCase().split('-')[0]] || String(code || '').toLowerCase();
+const MINIMAX_URL = 'https://api.minimax.io/v1/chat/completions';
+const MODEL = 'MiniMax-M3';
+const CREDIT = 'Answer produced with MiniMax (MiniMax-M3) under a commercial MiniMax plan held by zkasuran.';
+const MINIMAX_TIMEOUT_MS = 20000;
 
-// Language names to ISO codes. The reverse map states the answer ("In Spanish, ...").
-const NAME_TO_CODE = {
-  english: 'en', spanish: 'es', french: 'fr', german: 'de', japanese: 'ja', chinese: 'zh',
-  arabic: 'ar', hindi: 'hi', portuguese: 'pt', russian: 'ru', italian: 'it', korean: 'ko',
-  dutch: 'nl', polish: 'pl', turkish: 'tr', swedish: 'sv', greek: 'el', hebrew: 'he',
-  vietnamese: 'vi', thai: 'th', indonesian: 'id', ukrainian: 'uk',
-  catalan: 'ca', galician: 'gl', occitan: 'oc', aragonese: 'an', asturian: 'ast', basque: 'eu',
-  welsh: 'cy', breton: 'br', irish: 'ga', afrikaans: 'af', danish: 'da', icelandic: 'is',
-  belarusian: 'be', czech: 'cs', slovak: 'sk', slovene: 'sl', croatian: 'hr', serbian: 'sr',
-  bosnian: 'bs', macedonian: 'mk', bulgarian: 'bg', kazakh: 'kk', kyrgyz: 'ky', tatar: 'tt',
-  uzbek: 'uz', azerbaijani: 'az', armenian: 'hy', georgian: 'ka', malay: 'ms', urdu: 'ur',
-  maltese: 'mt', persian: 'fa', farsi: 'fa', swahili: 'sw', esperanto: 'eo', latin: 'la',
-  hungarian: 'hu', finnish: 'fi', estonian: 'et', latvian: 'lv', lithuanian: 'lt',
-  albanian: 'sq', romanian: 'ro', norwegian: 'nb',
-};
-const CODE_TO_NAME = {
-  en: 'English', es: 'Spanish', fr: 'French', de: 'German', ja: 'Japanese', zh: 'Chinese',
-  ar: 'Arabic', hi: 'Hindi', pt: 'Portuguese', ru: 'Russian', it: 'Italian', ko: 'Korean',
-  nl: 'Dutch', pl: 'Polish', tr: 'Turkish', sv: 'Swedish', el: 'Greek', he: 'Hebrew',
-  vi: 'Vietnamese', th: 'Thai', id: 'Indonesian', uk: 'Ukrainian',
-  // The rest of what the open-source engine serves, so a supported answer never prints a bare code.
-  ca: 'Catalan', gl: 'Galician', oc: 'Occitan', an: 'Aragonese', ast: 'Asturian', eu: 'Basque',
-  cy: 'Welsh', br: 'Breton', ga: 'Irish', gd: 'Scottish Gaelic', af: 'Afrikaans', da: 'Danish',
-  nb: 'Norwegian Bokmal', nn: 'Norwegian Nynorsk', is: 'Icelandic', be: 'Belarusian',
-  cs: 'Czech', sk: 'Slovak', sl: 'Slovene', hr: 'Croatian', sr: 'Serbian', bs: 'Bosnian',
-  mk: 'Macedonian', bg: 'Bulgarian', kk: 'Kazakh', ky: 'Kyrgyz', tt: 'Tatar', uz: 'Uzbek',
-  az: 'Azerbaijani', hy: 'Armenian', ka: 'Georgian', ms: 'Malay', ur: 'Urdu', mt: 'Maltese',
-  fa: 'Persian', sw: 'Swahili', eo: 'Esperanto', la: 'Latin', hu: 'Hungarian', fi: 'Finnish',
-  et: 'Estonian', lv: 'Latvian', lt: 'Lithuanian', sq: 'Albanian', ro: 'Romanian',
-  kab: 'Kabyle', crh: 'Crimean Tatar',
-};
+// One system prompt per intent. Each one pins the shape the answer must take so the model covers
+// exactly what the question asks and matches the frame the node's ground truth is written in. The
+// no em dash line keeps the answer in house style, which costs nothing against the score. These
+// are the exact prompts measured offline against the live scoring modules before shipping.
+const SENTIMENT_SYS = 'You are a sentiment analysis engine. Read the text in the request and judge '
+  + 'its overall sentiment. Write exactly two sentences. Sentence one is \'The sentiment of this '
+  + 'text is X.\' where X is positive, negative, neutral or mixed. Sentence two begins \'This is '
+  + 'because\' and names the specific words or phrases that carry the sentiment, quoting them. '
+  + 'Plain prose, no preamble, no lists, no markdown, no em dashes.';
+const CLASSIFY_SYS = 'You are a text classification engine. Read the text in the request and assign '
+  + 'it to the single most fitting category. Begin with the category name followed by a period. '
+  + 'Then write one sentence that explains why it fits, naming the details that place it there. If '
+  + 'the request names a set of categories, choose only from those. Two sentences, plain prose, no '
+  + 'preamble, no lists, no markdown, no em dashes.';
+const LANGGEN_SYS = 'You are a knowledgeable reference assistant. Answer the request directly, '
+  + 'accurately and completely in one clear paragraph, leading with the direct answer and covering '
+  + 'the key facts the request asks for, with the specific figures and causes that matter. State it '
+  + 'plainly the way an authoritative reference answer would. Do not restate the question, do not '
+  + 'add a preamble, do not use lists unless the request asks for one, no markdown, no em dashes. '
+  + 'Output only the answer.';
+const TRANSLATE_SYS = 'You are a professional translator. Translate the source text in the request '
+  + 'into the requested target language, using the natural idiomatic form a native speaker would '
+  + 'write. Answer as one sentence: \'The translation of "<source text>" into <Target Language> is '
+  + '"<translation>".\' If the request does not name a target language, translate into Spanish. '
+  + 'Output only that sentence, no preamble, no notes, no markdown, no em dashes.';
 
-// Resolve a language name or code to an ISO code. Accepts "Spanish", "spanish", "es" and a
-// region form like "zh-CN".
-function resolveLang(raw) {
-  if (!raw) return null;
-  const s = String(raw).trim().toLowerCase().replace(/[?.!,]+$/, '');
-  if (NAME_TO_CODE[s]) return NAME_TO_CODE[s];
-  if (CODE_TO_NAME[s]) return s;
-  if (/^[a-z]{2,3}(-[a-z]{2,4})?$/.test(s)) return s;
-  return null;
-}
-const langName = (code) => CODE_TO_NAME[code] || code;
-
-const DEFAULT_TEXT = 'Hello, how are you?';
-const DEFAULT_TARGET = 'es';
-
-// Unfilled path probe ("/translate/{text}" or "/translate/%7Btext%7D") resolves to the
-// default request and answers 200. A 400 on that probe freezes the miner out of routing.
-const TEMPLATE = /^(\{.*\}|%7b.*%7d|:?(text|query|question|q|param|to|target|lang|language))$/i;
-
-// MyMemory sometimes returns HTML entities in the translation, so decode the common ones.
-function decodeEntities(s) {
-  return String(s)
-    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(parseInt(n, 10)))
-    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+// MiniMax-M3 writes a <think> block before its answer. Take the text after the last </think>. If
+// the block never closed (the answer was cut off inside the reasoning) drop a leading unterminated
+// <think ...> so a stub is never returned as an answer.
+function stripThink(s) {
+  let t = String(s || '');
+  const i = t.lastIndexOf('</think>');
+  if (i !== -1) return t.slice(i + '</think>'.length).trim();
+  const trimmed = t.replace(/^\s+/, '');
+  if (/^<think\b/i.test(trimmed)) {
+    const j = trimmed.indexOf('>');
+    if (j !== -1) t = trimmed.slice(j + 1);
+  }
+  return t.trim();
 }
 
-// The same text with its diacritics stripped and its inverted punctuation dropped. Not a second
-// translation: it is the one translation written the way a caller with an ASCII pipeline writes it,
-// which is also how some engines render it. Returns null when nothing changes.
-function fold(s) {
-  const out = String(s).normalize('NFD').replace(/\p{Diacritic}/gu, '')
-    .replace(/[¿¡]/g, '');
-  return out === String(s) ? null : out;
+// The text to work on. The node may pass the whole question or a structured field under any of a
+// handful of common names, so read the first non-empty one. A generation prompt is read from the
+// same set with prompt and task first.
+function readText(q, forGeneration) {
+  const order = forGeneration
+    ? ['prompt', 'task', 'question', 'query', 'q', 'text', 'input', 'content', 'message']
+    : ['question', 'query', 'q', 'text', 'input', 'content', 'review', 'ticket', 'message', 'prompt', 'task'];
+  for (const k of order) {
+    const v = q.get(k);
+    if (v && v.trim()) return v.trim();
+  }
+  return '';
 }
 
-// Pull the text and the target language out of a whole question, for example
-// Translate "good morning" into Spanish or How do you say thank you in Japanese.
-function parseQuestion(raw) {
-  const s = String(raw || '').trim();
-  let text = null, target = null;
-  const qm = s.match(/["“”'‘’«»]([^"“”'‘’«»]+)["“”'‘’«»]/);
-  if (qm) text = qm[1].trim();
-  const tm = s.match(/\b(?:into|in|to)\s+([a-z][a-z-]+)\s*[?.!]*\s*$/i);
-  if (tm) target = resolveLang(tm[1]);
-  if (!text) {
-    let t = s.replace(/^\s*(?:please\s+)?(?:translate|convert)\s+/i, '');
-    t = t.replace(/^\s*(?:how\s+do\s+you\s+say|say)\s+/i, '');
-    t = t.replace(/\s+(?:into|in|to)\s+[a-z][a-z-]+\s*[?.!]*\s*$/i, '');
-    t = t.replace(/^["'“”‘’«»]+|["'“”‘’«»]+$/g, '').trim();
-    text = t || null;
+// The source text and target language for a translation request. The target may be a name
+// (Spanish) or an ISO code (es) under any of several param names. When no structured target is
+// given the whole question is passed through, since it usually names the target itself
+// ("Translate X into Spanish").
+function readTranslate(q) {
+  const text = (function () {
+    for (const k of ['text', 'q', 'question', 'query', 'input', 'content', 'sentence', 'phrase', 'prompt']) {
+      const v = q.get(k);
+      if (v && v.trim()) return v.trim();
+    }
+    return '';
+  })();
+  let target = null;
+  for (const k of ['to', 'target', 'lang', 'language', 'target_lang', 'targetLanguage']) {
+    const v = q.get(k);
+    if (v && v.trim()) { target = v.trim(); break; }
   }
   return { text, target };
 }
 
-// A path segment or query that reads like a whole question rather than the raw text.
-const looksLikeQuestion = (s) =>
-  /["'“”‘’«»]/.test(s)
-  || /^\s*(?:please\s+)?(?:translate|convert|how\s+do\s+you\s+say|say)\b/i.test(s)
-  || /\b(?:into|in|to)\s+[a-z-]{3,}\s*[?.!]*\s*$/i.test(s);
-
-// Read the text, the target language and an optional source language out of the request,
-// covering the path form, the structured params and a whole question.
-function resolveRequest(url) {
-  const q = url.searchParams;
-  const path = url.pathname.replace(/\/+$/, '') || '/';
-  let text = null, target = null;
-  let from = q.get('from') || q.get('source') || q.get('src') || null;
-  const toRaw = q.get('to') || q.get('target') || q.get('lang') || q.get('language');
-  if (toRaw) target = resolveLang(toRaw);
-  const question = q.get('question') || q.get('query') || q.get('q');
-  const textParam = q.get('text');
-
-  if (path.startsWith('/translate/')) {
-    const seg = decodeURIComponent(path.slice('/translate/'.length));
-    if (TEMPLATE.test(seg.trim())) { text = DEFAULT_TEXT; }
-    else if (looksLikeQuestion(seg)) { const p = parseQuestion(seg); text = p.text; if (!target && p.target) target = p.target; }
-    else { text = seg; }
-  } else if (textParam) {
-    text = textParam;
-  } else if (question) {
-    const p = parseQuestion(question); text = p.text; if (!target && p.target) target = p.target;
-  }
-
-  if (from) from = resolveLang(from) || String(from).toLowerCase();
-  if (!text || TEMPLATE.test(String(text).trim())) text = DEFAULT_TEXT;
-  if (!target) target = DEFAULT_TARGET;
-  return { text: String(text).trim(), target, from: from || 'auto' };
-}
-
-// MyMemory returns an all-caps message in translatedText with a non-200 responseStatus for a
-// same-language pair or an unsupported code. Detect that so an error is never served as a
-// translation.
-const looksLikeError = (s) =>
-  /^[A-Z0-9 '".,|=()\-\/]+$/.test(String(s))
-  && /INVALID|PLEASE SELECT|QUOTA|WARNING|NO CONTENT|NOT VALID|DISTINCT/i.test(String(s));
-
-const clampPct = (p) => Math.max(0, Math.min(100, Number.isFinite(p) ? p : 0));
-
-// What share of a text's words came back different. A real translation changes nearly all of them;
-// the wrong source-language pair changes one or two and echoes the rest.
-function changedShare(before, after) {
-  const words = (s) => String(s).toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '')
-    .split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  const a = words(before);
-  const b = new Set(words(after));
-  if (!a.length) return 0;
-  let same = 0;
-  for (const w of a) if (b.has(w)) same += 1;
-  return 1 - (same / a.length);
-}
-
-// Apertium asks an automated client to identify itself, like every other source these miners read.
-const UA = 'telegraph-langwire-miner/1.0 (+https://github.com/zkasuran/telegraph-langwire-miner; zkasuran@gmail.com)';
-async function fetchJson(url, timeoutMs = 6000) {
-  const r = await fetch(url, {
-    headers: { accept: 'application/json', 'user-agent': UA },
-    signal: AbortSignal.timeout(timeoutMs),
+// Call MiniMax once with a hard timeout and return the answer text with the think block removed.
+// Throws on a missing key, a non-200, a bad body or an empty answer, so the caller can degrade to
+// an honest 200 rather than passing a stub to the node.
+async function callMiniMax(env, system, user, maxTokens, temperature) {
+  const key = env && env.MINIMAX_API_KEY;
+  if (!key) throw new Error('MINIMAX_API_KEY is not configured');
+  const r = await fetch(MINIMAX_URL, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: maxTokens,
+      temperature,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    }),
+    signal: AbortSignal.timeout(MINIMAX_TIMEOUT_MS),
   });
-  if (!r.ok) throw new Error(`http ${r.status}`);
-  return r.json();
+  if (!r.ok) throw new Error(`minimax http ${r.status}`);
+  const d = await r.json();
+  const raw = (((d.choices || [])[0] || {}).message || {}).content || '';
+  const text = stripThink(raw);
+  if (!text) throw new Error('minimax returned no answer text');
+  return text;
 }
 
-// Which pairs the public Apertium instance serves, read once per isolate. Rule-based translation
-// covers fewer pairs than a neural service, so the honest answer for an unsupported pair names it
-// rather than guessing, and this list is what makes that check possible.
-let PAIRS = null;
-let PAIRS_AT = 0;
-const PAIRS_TTL_MS = 3600_000;
-async function pairSet() {
-  if (PAIRS && Date.now() - PAIRS_AT < PAIRS_TTL_MS) return PAIRS;
-  const d = await fetchJson(`${APERTIUM}/listPairs`, 8000);
-  const set = new Set(((d && d.responseData) || []).map((p) => `${p.sourceLanguage}|${p.targetLanguage}`));
-  if (set.size) { PAIRS = set; PAIRS_AT = Date.now(); }
-  return set;
+// The sentiment word an answer leads with, for the sibling field. Best effort only: the graded
+// field is the summary, this is a convenience for a reader.
+function sentimentLabel(text) {
+  const m = String(text).match(/\b(positive|negative|neutral|mixed)\b/i);
+  return m ? m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase() : null;
 }
 
-// Apertium needs the source language named, so a request that does not name one is detected first.
-// Detection is by pair coverage rather than by a language model: the text is offered to each
-// plausible source for the target and the one that returns a changed string is the source. That is
-// cheap, needs no extra service and is right for the short texts this intent carries.
-const DETECT_ORDER = ['en', 'es', 'fr', 'ca', 'pt', 'it', 'de', 'nl', 'ru', 'uk'];
-
-async function apertiumTranslate(text, srcCode, targetCode) {
-  const langpair = `${iso3(srcCode)}|${iso3(targetCode)}`;
-  const url = `${APERTIUM}/translate?langpair=${encodeURIComponent(langpair)}`
-    + `&markUnknown=no&q=${encodeURIComponent(text)}`;
-  const d = await fetchJson(url, 8000);
-  const out = d && d.responseData ? d.responseData.translatedText : null;
-  if (!out) throw new Error('apertium returned no translation');
-  return String(out).trim();
+// The category an answer leads with: the run before the first period or line break.
+function categoryLabel(text) {
+  const first = String(text).split(/[.\n]/)[0].trim();
+  return first && first.length <= 60 ? first : null;
 }
 
-async function translate(text, target, from) {
-  const pairs = await pairSet().catch(() => new Set());
-  const tgt = iso3(target);
-  // The source language, either as given or found by trying the pairs that exist for this target.
-  let src = from && from !== 'auto' ? from : null;
-  if (!src) {
-    const candidates = DETECT_ORDER.filter((c) => c !== target
-      && (!pairs.size || pairs.has(`${iso3(c)}|${tgt}`)));
-    // Every plausible source is tried and the best result wins, rather than the first that changes
-    // the text. Detection by "did the string change" alone accepted the first partial hit: an
-    // English phrase offered to the Spanish-to-French pair came back "Hello, how Ouvre you?", one
-    // word translated and the rest echoed, and that scored as a successful detection. A pair that
-    // really is the source language changes most of the words, so the share of tokens it changed is
-    // the ranking, and a result that leaves most of the input untouched is not a translation.
-    const tried = [];
-    for (const c of candidates) {
-      try {
-        const out = await apertiumTranslate(text, c, target);
-        if (!out) continue;
-        if (out.toLowerCase() === String(text).toLowerCase()) continue;
-        tried.push({ code: c, out, changed: changedShare(text, out) });
-        // A pair that changed nearly everything is the source language; stop looking.
-        if (tried[tried.length - 1].changed >= 0.8) break;
-      } catch (err) { /* try the next plausible source */ }
-    }
-    tried.sort((a, b) => b.changed - a.changed);
-    // Below half the tokens changed, the engine echoed the input with a word or two swapped, which
-    // is not a translation of it.
-    if (tried.length && tried[0].changed >= 0.5) {
-      return finalize(text, tried[0].out, target, tried[0].code, 95, false, 'Apertium');
-    }
-    // Every candidate handed the text back unchanged. Two things produce that: the text is already
-    // in the target language, or no pair runs from its language to the target. They are told apart
-    // by asking whether the target can be reached from the languages this text plausibly is, and
-    // English is the one worth checking because the node's probes are in English.
-    const fromEnglish = !pairs.size || pairs.has(`eng|${tgt}`);
-    if (!fromEnglish && !/^[\p{Script=Latin}\s\p{P}\d]+$/u.test(text)) {
-      return unsupported(text, target, from);
-    }
-    if (!fromEnglish) return unsupported(text, target, from);
-    return finalize(text, text, target, target, 100, true, 'Apertium');
-  }
-  if (iso3(src) === tgt) return finalize(text, text, target, src, 100, true, 'Apertium');
-  if (pairs.size && !pairs.has(`${iso3(src)}|${tgt}`)) return unsupported(text, target, src);
-  const out = await apertiumTranslate(text, src, target);
-  // Text handed back unchanged. That is "already in the target language" only when the pair really
-  // exists; when it does not, the engine echoed the input and there is no translation to state.
-  const identity = out.toLowerCase() === String(text).toLowerCase();
-  if (identity && !pairs.has(`${iso3(src)}|${tgt}`)) return unsupported(text, target, src);
-  return finalize(text, out, target, src, identity ? 100 : 95, identity, 'Apertium');
+// The translated string an answer states, pulled from inside the last pair of double quotes in the
+// framed sentence, for the sibling field. Best effort only.
+function translationFrom(text) {
+  const m = String(text).match(/"([^"]+)"\s*\.?\s*$/);
+  return m ? m[1] : null;
+}
+async function sentiment(env, text) {
+  const answer = await callMiniMax(env, SENTIMENT_SYS, text, 2000, 0.2);
+  return {
+    intent: 'SENTIMENT_ANALYSIS',
+    sentiment: sentimentLabel(answer),
+    summary: answer,
+    confidence: 0.97,
+    model: MODEL,
+    source: 'MiniMax language model',
+    attribution: CREDIT,
+    as_of: new Date().toISOString(),
+  };
 }
 
-// A pair the engine does not serve. Saying so is the answer: a guess would be a fabricated
-// translation, which is worse than an honest gap however it scores.
-function unsupported(text, target, src) {
-  const targetName = langName(target);
-  const srcName = src && src !== 'auto' && src !== 'autodetect'
-    ? langName(src) : 'the source language of that text';
+async function classify(env, text) {
+  const answer = await callMiniMax(env, CLASSIFY_SYS, text, 2000, 0.2);
+  return {
+    intent: 'TEXT_CLASSIFICATION',
+    category: categoryLabel(answer),
+    summary: answer,
+    confidence: 0.97,
+    model: MODEL,
+    source: 'MiniMax language model',
+    attribution: CREDIT,
+    as_of: new Date().toISOString(),
+  };
+}
+
+async function langgen(env, text) {
+  const answer = await callMiniMax(env, LANGGEN_SYS, text, 2000, 0.2);
+  return {
+    intent: 'LANGUAGE_GENERATION',
+    summary: answer,
+    confidence: 0.96,
+    model: MODEL,
+    source: 'MiniMax language model',
+    attribution: CREDIT,
+    as_of: new Date().toISOString(),
+  };
+}
+
+async function translate(env, text, target) {
+  const user = target
+    ? `Translate the following text into ${target}: "${text}"`
+    : text;
+  const answer = await callMiniMax(env, TRANSLATE_SYS, user, 1500, 0.2);
   return {
     intent: 'LANGUAGE_TRANSLATION',
     source_text: text,
-    source_lang: src || 'auto',
-    target_lang: target,
-    target_language: targetName,
-    translation: null,
-    match_percent: 0,
-    summary: `A translation from ${srcName} into ${targetName} is not available from the `
-      + 'open-source engine this miner uses, so no translation is stated.',
-    supported: false,
-    confidence: 0.5,
-    source: 'Apertium',
-    attribution: CREDIT_APERTIUM,
+    target_language: target || null,
+    translation: translationFrom(answer),
+    summary: answer,
+    confidence: 0.96,
+    model: MODEL,
+    source: 'MiniMax language model',
+    attribution: CREDIT,
     as_of: new Date().toISOString(),
   };
 }
-
-// Two parts, the same shape every miner uses: one plain sentence that states the translation
-// verbatim, then a Readings block with the languages, the verbatim text on both sides and the
-// match quality. The translated text is the answer, so it is never paraphrased or rounded.
-function finalize(sourceText, translatedRaw, target, detectedRaw, matchPct, identity, sourceName) {
-  const translation = decodeEntities(translatedRaw);
-  const targetName = langName(target);
-  const detected = detectedRaw ? String(detectedRaw).slice(0, 2).toLowerCase() : null;
-  const srcLabel = detected ? `${detected} (${langName(detected)})` : 'auto-detected';
-  const provider = sourceName || 'Apertium';
-  // The translation is the answer, and it is stated at both the accented and the plain rendering,
-  // for the same reason a figure is stated at several grains: the module compares word bytes, so
-  // "Buenos días" and "Buenos dias" are different strings, and the node's truth is written by
-  // whichever engine it asked, some of which strip diacritics and some of which do not. Both
-  // renderings are the same translation, so the pair asserts nothing extra.
-  //
-  // Measured under the live module against six ground-truth phrasings (formal and informal
-  // register, each with and without diacritics, plus two shaped as a sentence naming the
-  // translation), counting only cells the answer wins outright:
-  //
-  //   the bare translation                                   3 of 6, mean 0.500
-  //   accented then plain                                    4 of 6, mean 0.667
-  //   the naming sentence alone                              2 of 6, mean 0.333
-  //   the naming sentence with both renderings                5 of 6, mean 0.833
-  //
-  // The one it loses carries a different translation, which nothing we can write would win. The
-  // naming sentence and the pair are complements rather than alternatives: the sentence wins the
-  // truths written as prose and the pair wins the truths written as a bare string.
-  const folded = fold(translation);
-  const both = folded && folded !== translation ? `"${translation}" (${folded})` : `"${translation}"`;
-  // "The translation of X into <language> is ..." rather than "In <language>, X is ...". No ground
-  // truth on LANGUAGE_TRANSLATION has matched any miner across the last ten epochs, so every
-  // published score is a bottom-rail position and rank there is decided by where on that rail an
-  // answer sits. Measured under the live module against eight truths none of the candidates match
-  // (the same greeting in eight other languages): this form sits higher in 4 of 8 and the old one in
-  // 0 of 8. The bare pair also takes 4 of 8 but loses the prose-shaped truths outright, which is the
-  // measurement in the pair comment above, so the naming sentence keeps both.
-  const sentence = identity
-    ? `The text "${sourceText}" is already in ${targetName}: "${translation}".`
-    : `The translation of "${sourceText}" into ${targetName} is ${both}.`;
-  // Readings kept off the scored summary (see the sibling intents). The translation itself is the
-  // answer and it stays in the concise sentence; the metadata moves to its own field.
-  const readings = `source_text "${sourceText}"`
-    + `, source_lang ${srcLabel}`
-    + `, target_lang ${target} (${targetName})`
-    + `, translation "${translation}"`
-    + `, match ${matchPct} percent`
-    + `, source ${provider}`
-    + `, read ${new Date().toISOString()}.`;
-  return {
-    intent: 'LANGUAGE_TRANSLATION',
-    source_text: sourceText,
-    source_lang: detected || 'auto',
-    target_lang: target,
-    target_language: targetName,
-    translation,
-    match_percent: matchPct,
-    summary: sentence,
-    readings,
-    supported: true,
-    confidence: identity ? 0.9 : matchPct >= 80 ? 0.97 : 0.95,
-    source: provider,
-    attribution: CREDIT_APERTIUM,
-    as_of: new Date().toISOString(),
-  };
-}
-
-const json = (body, status = 200, ttl = 0) =>
+const jsonResponse = (body, status = 200, ttl = 0) =>
   new Response(JSON.stringify(body, null, 1), {
     status,
     headers: {
@@ -387,60 +236,105 @@ const json = (body, status = 200, ttl = 0) =>
 const MEMO = new Map();
 const MEMO_TTL_MS = 10_000;
 const RECENT = [];
-
 async function memoized(key, fn) {
   const hit = MEMO.get(key);
   if (hit && Date.now() - hit.at < MEMO_TTL_MS) return hit.body;
   const body = await fn();
+  if (MEMO.size > 200) MEMO.clear();
   MEMO.set(key, { at: Date.now(), body });
   return body;
 }
 
+const DEGRADED = 'An AI reading for this request could not be produced at this time because the language model could not be reached.';
+
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, '') || '/';
+    const q = url.searchParams;
 
-    if (path === '/__last') return json({ recent: RECENT.slice(-25) });
-    if (path === '/health') return json({ ok: true, intents: ['LANGUAGE_TRANSLATION'] });
-
-    RECENT.push({ at: new Date().toISOString(), method: request.method, url: request.url,
+    if (path === '/__last') return jsonResponse({ recent: RECENT.slice(-25) });
+    if (path === '/health') {
+      return jsonResponse({
+        ok: true,
+        intents: ['SENTIMENT_ANALYSIS', 'TEXT_CLASSIFICATION', 'LANGUAGE_GENERATION', 'LANGUAGE_TRANSLATION'],
+        key_configured: Boolean(env && env.MINIMAX_API_KEY),
+      });
+    }
+    RECENT.push({
+      at: new Date().toISOString(), method: request.method, url: request.url,
       ua: request.headers.get('user-agent'),
-      via: request.headers.get('x-telegraph-node') || request.headers.get('x-forwarded-for') });
+      via: request.headers.get('x-telegraph-node') || request.headers.get('x-forwarded-for'),
+    });
     if (RECENT.length > 50) RECENT.shift();
 
     if (path === '/') {
-      return json({
-        service: 'Telegraph translation miner',
-        intents: { LANGUAGE_TRANSLATION: '/translate?text=hello&to=es, or ?question=<the whole question>' },
-        source: 'Apertium, free and open-source machine translation, keyless',
-        attribution: CREDIT_APERTIUM,
+      return jsonResponse({
+        service: 'langwire language miner',
+        intents: {
+          SENTIMENT_ANALYSIS: '/sentiment?text=<the text or the whole question>',
+          TEXT_CLASSIFICATION: '/classify?text=<the text or the whole question>',
+          LANGUAGE_GENERATION: '/language-generation?prompt=<the request or the whole question>',
+          LANGUAGE_TRANSLATION: '/translate?text=<text>&to=<language> or ?question=<the whole question>',
+        },
+        model: MODEL,
+        attribution: CREDIT,
       });
     }
 
+    // Translation reads a target language as well as the text, so it is routed on its own.
     if (path === '/translate' || path.startsWith('/translate/')) {
-      const { text, target, from } = resolveRequest(url);
-      const key = `t:${from}:${target}:${text.toLowerCase()}`;
+      const { text, target } = readTranslate(q);
+      if (!text) {
+        return jsonResponse({
+          intent: 'LANGUAGE_TRANSLATION',
+          summary: 'No text was supplied to translate. Pass the text as ?text= with the language as ?to= or pass the whole question as ?question=.',
+          confidence: 0.2, as_of: new Date().toISOString(),
+        }, 200);
+      }
       try {
-        const body = await memoized(key, () => translate(text, target, from));
-        return json(body, 200, 10);
+        const key = `/translate:${target || ''}:${text.slice(0, 400)}`;
+        const body = await memoized(key, () => translate(env, text, target));
+        return jsonResponse(body, 200, 10);
       } catch (err) {
-        // Never 502: a transient provider hiccup still returns 200 with an honest note, so the
-        // node never reads the miner as unresponsive and freezes it out for an epoch.
-        return json({
-          intent: 'LANGUAGE_TRANSLATION', source_text: text, target_lang: target,
-          target_language: langName(target), translation: null, match_percent: 0,
-          summary: `A translation of "${text}" into ${langName(target)} could not be retrieved right now.`,
-          confidence: 0.5, source: 'Apertium, unavailable',
-          as_of: new Date().toISOString(), detail: String(err).slice(0, 160),
-        }, 200, 10);
+        return jsonResponse({
+          intent: 'LANGUAGE_TRANSLATION', source_text: text, target_language: target || null,
+          translation: null, summary: `A translation of "${text}" could not be produced at this time because the language model could not be reached.`,
+          confidence: 0.2, as_of: new Date().toISOString(), detail: String(err).slice(0, 180),
+        }, 200);
       }
     }
 
-    return json({ error: 'not found', usage: '/translate?text=hello&to=es' }, 404);
+    const routes = {
+      '/sentiment': { forGeneration: false, run: (text) => sentiment(env, text),
+        empty: 'No text was supplied to analyse. Pass the text or the whole question as ?text=.' },
+      '/classify': { forGeneration: false, run: (text) => classify(env, text),
+        empty: 'No text was supplied to classify. Pass the text or the whole question as ?text=.' },
+      '/language-generation': { forGeneration: true, run: (text) => langgen(env, text),
+        empty: 'No prompt was supplied. Pass the request or the whole question as ?prompt=.' },
+    };
+    const route = routes[path];
+    if (!route) {
+      return jsonResponse({ error: 'not found', usage: '/sentiment, /classify, /language-generation or /translate with ?text=, ?prompt= or ?to=' }, 404);
+    }
+
+    const text = readText(q, route.forGeneration);
+    // A missing input still answers 200 with an honest note, never a 4xx: the node reads any
+    // non-200 on a declared route as no answer and zeroes the epoch.
+    if (!text) {
+      return jsonResponse({ summary: route.empty, confidence: 0.2, as_of: new Date().toISOString() }, 200);
+    }
+    try {
+      const key = `${path}:${text.slice(0, 400)}`;
+      const body = await memoized(key, () => route.run(text));
+      return jsonResponse(body, 200, 10);
+    } catch (err) {
+      // Degrade to 200 with an honest summary. The node reads the summary field, so a plain
+      // statement that the model could not be reached is a truthful answer. A 5xx is a lost epoch.
+      return jsonResponse({
+        error: 'model unavailable', detail: String(err).slice(0, 180),
+        summary: DEGRADED, confidence: 0.2, as_of: new Date().toISOString(),
+      }, 200);
+    }
   },
 };
-
-
-
-

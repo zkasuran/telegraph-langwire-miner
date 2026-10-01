@@ -1,76 +1,71 @@
-# LangWire, a Telegraph translation miner
+# LangWire, a Telegraph language-model miner
 
-LangWire answers the Telegraph **LANGUAGE_TRANSLATION** intent. Give it a phrase and a target
-language and it returns the translation, stated verbatim in one plain sentence followed by a
-Readings block with the languages and the match quality. It is a Cloudflare Worker with no
-database and no API key.
+LangWire answers four model-judged Telegraph intents from one Cloudflare Worker, routed by path
+prefix:
 
-## Data source
+- **SENTIMENT_ANALYSIS** at `/sentiment`
+- **TEXT_CLASSIFICATION** at `/classify`
+- **LANGUAGE_GENERATION** at `/language-generation`
+- **LANGUAGE_TRANSLATION** at `/translate`
 
-[Apertium](https://www.apertium.org/), the free and open-source rule-based translation engine, read
-live at request time with no key.
+Each answer is produced by MiniMax (MiniMax-M3) at request time. These intents are graded by the
+node against a ground truth it writes itself with a model, so a genuinely correct, well-shaped
+answer is what scores. This miner is **not keyless**: it calls a keyed provider the operator holds
+a commercial plan for, which is what a model-judged intent needs.
 
-Apertium is here for its licence rather than its reach. The endpoints this miner used before cannot
-be squared with a paid miner:
+## The model and the key
 
-- **Google's keyless `translate_a/t` endpoint** is undocumented, and the Translate API terms state
-  the API "is provided to you without any free usage quota". Google's own attribution page also
-  requires a "powered by Google Translate" graphic displayed "adjacent any translation results",
-  which a JSON API cannot show.
-- **MyMemory** bars users from reselling "Translated's services as they are without Translated
-  express consent", and caps anonymous use at 5000 characters a day shared across every caller on
-  the same address.
+[MiniMax](https://www.minimax.io/) (model `MiniMax-M3`), called once per request with a tight
+per-intent system prompt. MiniMax-M3 is a reasoning model that emits a `<think>` block before its
+answer. The worker strips that block and returns only the answer as the `summary` the node grades.
 
-Every alternative with a real commercial grant was probed from this edge and none answered: the
-public LibreTranslate instances return 405, 502, 523 or a bot challenge, and every Lingva mirror
-500s or 503s.
+The API key is never in this repo. It is a Cloudflare secret:
 
-Apertium is rule based, so it serves 133 language pairs rather than every pair. A pair it does not
-serve gets an answer that says so. That is deliberate: a guessed translation is a fabricated answer,
-which is worse than an honest gap however it scores.
+```bash
+wrangler secret put MINIMAX_API_KEY
+```
+
+The worker reads it as `env.MINIMAX_API_KEY`. With no key or on any upstream error or timeout, the
+worker still answers 200 with an honest degraded summary, because the node reads any non-200 on a
+declared route as no answer and scores the whole epoch zero.
 
 ## Answer format
 
-The `summary` field is the answer. The translation leads the sentence verbatim, then the
-readings repeat it with the languages and the match quality.
+The `summary` field is the answer the node grades.
 
-```
-In Spanish, "good morning" is "buenos días". Readings: source_text "good morning", source_lang
-en (English), target_lang es (Spanish), translation "buenos días", match 85 percent, source
-MyMemory translation API, read <timestamp>.
-```
-
-The translated text is never paraphrased or altered, so the sentence and the readings always
-carry the same string.
-
-## Languages
-
-Common world languages by name or ISO code: English (en), Spanish (es), French (fr), German
-(de), Japanese (ja), Chinese (zh), Arabic (ar), Hindi (hi), Portuguese (pt), Russian (ru),
-Italian (it), Korean (ko) and more. A name such as "Spanish" or a code such as "es" both
-resolve.
+- **Sentiment:** `The sentiment of this text is positive. This is because the phrases "absolutely
+  love" and "works flawlessly" convey strong satisfaction.`
+- **Classification:** `Billing. The ticket describes a duplicate payment charge and a refund
+  request, which fall under billing and payment processing.`
+- **Generation:** a direct, complete reference answer to the request in one clear paragraph.
+- **Translation:** `The translation of "Good morning, how are you?" into Spanish is "Buenos días,
+  ¿cómo estás?".`
 
 ## Endpoints
 
-- `GET /translate?text=hello&to=es` query form, with an optional `?from=`. Also reads
-  `?question=` or `?query=` and parses a whole question such as
-  `Translate "good morning" into Spanish` or `How do you say thank you in Japanese?`.
-- `GET /translate/{text}?to=fr` path form, the text in the path and the target in `?to=`. An
-  unfilled template such as `/translate/{text}` resolves to a default request and answers 200.
-- `GET /health` and `GET /__last` for diagnostics.
+- `GET /sentiment?text=<text>` sentiment for one passage. Also reads `?question=` or `?query=`.
+- `GET /classify?text=<text>` the single best category plus one reason. Also reads `?question=`.
+- `GET /language-generation?prompt=<request>` a generated answer. Also reads `?question=`.
+- `GET /translate?text=<text>&to=<language>` a translation. Also reads a whole question in
+  `?question=` such as `Translate "good morning" into Spanish`.
+- `GET /health` and `GET /__last` for diagnostics. `/health` reports whether the key is configured.
 
-When no target is given the default is Spanish. When nothing is given at all the default
-request is "Hello, how are you?" into Spanish.
+Every declared route answers 200, including the empty-input and model-unavailable paths. Only an
+undeclared path returns 404.
 
 ## Deploy
 
 ```bash
+wrangler secret put MINIMAX_API_KEY   # once, the key is pasted at the prompt, never in a file
 wrangler deploy
 ```
 
-No secrets and no bindings. `wrangler.toml` names the worker `telegraph-lang` and the base
-URL is `https://telegraph-lang.margyn.workers.dev`.
+`wrangler.toml` names the worker `telegraph-lang`, so the base URL is
+`https://telegraph-lang.margyn.workers.dev`. No other secrets and no bindings.
 
-## License
+## Licence
 
-MIT, see `LICENSE`.
+Source-available, no derivatives (SAND 1.0), see `LICENSE`. Read it, audit it, run your own
+instance to check it. Do not redistribute it, publish a modified copy or redeploy it as a
+competing miner. The third-party model terms and the credit line MiniMax asks for are in `NOTICE`
+and `DATA-SOURCES.md`.

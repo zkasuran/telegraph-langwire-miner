@@ -2,5 +2,10 @@ name = "telegraph-lang"
 main = "worker.js"
 compatibility_date = "2025-06-01"
 
-# LangWire translation miner for Telegraph. Serves LANGUAGE_TRANSLATION (/translate) from the
-# public MyMemory API, keyless. No secrets, no bindings: deploy is just `wrangler deploy`.
+# langwire miner for Telegraph. One worker, routed by path prefix, serving four model-judged
+# intents from MiniMax (MiniMax-M3): SENTIMENT_ANALYSIS (/sentiment), TEXT_CLASSIFICATION
+# (/classify), LANGUAGE_GENERATION (/language-generation) and LANGUAGE_TRANSLATION (/translate).
+#
+# No bindings. The MiniMax key is a secret, never in this file:
+#   wrangler secret put MINIMAX_API_KEY
+# The worker reads it as env.MINIMAX_API_KEY. Deploy with `wrangler deploy` after the secret is set.

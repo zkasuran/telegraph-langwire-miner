@@ -1,40 +1,62 @@
 # Data sources
 
-Every figure this miner serves is a live read at request time. This file records, per source,
-what it provides, what its own terms say about commercial use and redistribution, what credit it
-requires and what its real rate limit is.
+This miner does not read a public data feed. Every answer it serves is produced by a language
+model, MiniMax, called once per request. This file records what the model provides, under what
+plan, what its terms say about output ownership and commercial use and what is still open.
 
-Two rules were followed in writing it. A licence is only recorded when the provider's own terms
-page was read; where a page could not be read, that is stated as unverified rather than guessed.
-And every source was called from a Cloudflare Worker before it went in, because several hosts
-answer differently from a worker than from a laptop.
+Two rules were followed in writing it. A licence or a terms clause is only recorded when the
+provider's own page was read. Where a page could not be read that is stated as unverified
+rather than guessed. And the model was called from a Cloudflare Worker before it went in, so
+the request path is the one the miner actually uses.
 
-| Host | Provides | Licence | Commercial use | Attribution | Rate limit |
+MiniMax is the authorized backing provider for this miner. The four intents it serves are
+model-judged: the node writes its own ground truth with a model and scores a miner on how well
+its answer matches that truth, so a genuinely correct, well-shaped answer is what scores. The
+miner calls a keyed provider the operator holds a commercial plan for rather than a free public
+feed, by design, because that is what a model-judged intent needs.
+
+| Host | Provides | Plan | Output ownership | Commercial use | Rate limit |
 | --- | --- | --- | --- | --- | --- |
-| apertium.org | Machine translation | Free and open-source (GPL for the engine and the language data). | Not restricted by the project. The public instance publishes no terms, which is recorded as unverified for the hosted service. | Credited in every answer. | No published limit on the public instance. One or two calls per uncached request. |
+| api.minimax.io | MiniMax-M3 answers for SENTIMENT_ANALYSIS, TEXT_CLASSIFICATION, LANGUAGE_GENERATION and LANGUAGE_TRANSLATION | Paid commercial MiniMax plan held by the operator, key as a Cloudflare secret | User keeps ownership of generated content per MiniMax's readable consumer terms, but the exact paid Open Platform clause could not be read (unverified, open item) | Not confirmed for the paid API surface, see the open item below | Governed by the paid plan, not published as a fixed public number. This miner declares 2 requests per second and makes one model call per request |
 
 ## Per source
 
-### apertium.org
+### api.minimax.io (MiniMax API, Open Platform)
 
-Machine translation.
+The language-model answer for every intent. One call to MiniMax-M3 with a tight per-intent
+system prompt, at request time. The model emits a reasoning block before its answer, which the
+worker strips, returning only the answer as the summary the node grades.
 
-Commercial use: Not restricted by the project. The public instance publishes no terms, which is recorded as unverified for the hosted service.
+Plan: a paid commercial MiniMax plan held by the operator. The key is a Cloudflare secret set
+with `wrangler secret put MINIMAX_API_KEY` and read as env.MINIMAX_API_KEY. It is never written
+into worker.js, wrangler.toml, a descriptor, this file or any other file in the repo.
 
-Attribution: Credited in every answer.
+What the readable terms say: MiniMax's consumer App and Web Terms of Service state "We do not
+claim ownership of User Contributions or User Generated Content" and separately "These Terms of
+Use permit you to use the Services for your personal, non-commercial use only". Those two lines
+are from the consumer surface, not the paid API Open Platform, so the non-commercial limit is a
+consumer-app limit rather than a limit on the paid API.
+
+Commercial use: not confirmed for the paid API surface. The Open Platform terms page
+(https://platform.minimax.io/protocol/en-US/user-agreement) is client-rendered and returned no
+text to a server fetch (404 to a server fetch on 2026-10-01), so the clause that governs output
+ownership and commercial reuse on the paid plan could not be quoted.
 
 Credit line published in every answer:
 
-    Translation by Apertium (https://www.apertium.org/), free and open-source machine translation.
-
-Rate limit: No published limit on the public instance. One or two calls per uncached request.
-
-Rule-based, so it covers 133 pairs rather than every pair. A pair it does not serve is answered by saying so, because a guessed translation is a fabricated answer. Google's keyless endpoint was dropped: the Translate API "is provided to you without any free usage quota" and its attribution rules require a "powered by Google Translate" graphic a JSON API cannot show. MyMemory was dropped for its resale bar and its 5000 character shared daily cap.
+    Answer produced with MiniMax (MiniMax-M3) under a commercial MiniMax plan held by zkasuran.
 
 ## Compliance
 
 Met:
 
-- apertium.org: the required credit line travels in every answer and in NOTICE.
+- The key is held as a Cloudflare secret and appears in no file in the repo.
+- The credit line naming MiniMax as the source travels in every answer and in NOTICE.
+- Every answer is a live model call at request time, with a short per-isolate memo only.
 
-No open items: every source this miner calls permits the use, and every required credit line is published.
+Open:
+
+- The exact MiniMax API (Open Platform) clause on output ownership and commercial reuse under
+  the paid plan is unverified, because the platform terms page is client-rendered and could not
+  be read by a server fetch. Confirm that clause for the paid plan before this miner is
+  registered to sell answers. The answers score. The licence clause is the item to close.
